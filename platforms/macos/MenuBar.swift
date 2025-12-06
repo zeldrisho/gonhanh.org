@@ -4,6 +4,8 @@ import SwiftUI
 class MenuBarController {
     private var statusItem: NSStatusItem!
     private var settingsWindow: NSWindow?
+    private var isEnabled = true
+    private var currentMethod = 0  // 0=Telex, 1=VNI
 
     init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -15,20 +17,40 @@ class MenuBarController {
         setupMenu()
 
         // Start keyboard hook
-        RustBridge.startHook()
+        KeyboardHookManager.shared.start()
     }
 
     private func setupMenu() {
         let menu = NSMenu()
 
+        // Enable/Disable
         let enabledItem = NSMenuItem(
             title: "Bật GoNhanh",
             action: #selector(toggleEnabled),
             keyEquivalent: ""
         )
         enabledItem.target = self
-        enabledItem.state = .on
+        enabledItem.state = isEnabled ? .on : .off
         menu.addItem(enabledItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        // Input method submenu
+        let methodMenu = NSMenu()
+
+        let telexItem = NSMenuItem(title: "Telex", action: #selector(setTelex), keyEquivalent: "")
+        telexItem.target = self
+        telexItem.state = currentMethod == 0 ? .on : .off
+        methodMenu.addItem(telexItem)
+
+        let vniItem = NSMenuItem(title: "VNI", action: #selector(setVNI), keyEquivalent: "")
+        vniItem.target = self
+        vniItem.state = currentMethod == 1 ? .on : .off
+        methodMenu.addItem(vniItem)
+
+        let methodItem = NSMenuItem(title: "Kiểu gõ", action: nil, keyEquivalent: "")
+        methodItem.submenu = methodMenu
+        menu.addItem(methodItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -62,10 +84,40 @@ class MenuBarController {
     }
 
     @objc func toggleEnabled() {
-        // TODO: Toggle via Rust
+        isEnabled.toggle()
+        RustBridge.setEnabled(isEnabled)
+
         if let item = statusItem.menu?.item(at: 0) {
-            item.state = item.state == .on ? .off : .on
+            item.state = isEnabled ? .on : .off
         }
+
+        // Update icon
+        if let button = statusItem.button {
+            button.image = NSImage(
+                systemSymbolName: isEnabled ? "keyboard" : "keyboard.badge.ellipsis",
+                accessibilityDescription: "GoNhanh"
+            )
+        }
+    }
+
+    @objc func setTelex() {
+        currentMethod = 0
+        RustBridge.setMethod(0)
+        updateMethodMenu()
+    }
+
+    @objc func setVNI() {
+        currentMethod = 1
+        RustBridge.setMethod(1)
+        updateMethodMenu()
+    }
+
+    private func updateMethodMenu() {
+        guard let methodItem = statusItem.menu?.item(withTitle: "Kiểu gõ"),
+              let methodMenu = methodItem.submenu else { return }
+
+        methodMenu.item(at: 0)?.state = currentMethod == 0 ? .on : .off
+        methodMenu.item(at: 1)?.state = currentMethod == 1 ? .on : .off
     }
 
     @objc func openSettings() {

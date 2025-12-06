@@ -63,7 +63,8 @@ struct SettingsView: View {
     }
 
     func saveSettings() {
-        RustBridge.saveConfig(enabled: enabled, mode: UInt8(mode.rawValue))
+        RustBridge.setEnabled(enabled)
+        RustBridge.setMethod(mode.rawValue)
         NSApp.keyWindow?.close()
     }
 }

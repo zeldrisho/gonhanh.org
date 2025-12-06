@@ -23,6 +23,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        RustBridge.stopHook()
+        KeyboardHookManager.shared.stop()
     }
 }
