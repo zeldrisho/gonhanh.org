@@ -65,9 +65,7 @@ enum AppMetadata {
 enum SettingsKey {
     static let enabled = "gonhanh.enabled"
     static let method = "gonhanh.method"
-    static let modernOrtho = "gonhanh.modern"
     static let hasCompletedOnboarding = "gonhanh.onboarding.completed"
-    static let permissionGranted = "gonhanh.permission.granted"
 }
 
 // MARK: - Input Mode
