@@ -43,6 +43,17 @@ struct OnboardingView: View {
                         onNext: { currentStep = .setup },
                         onRestart: restartApp
                     )
+                    .onAppear {
+                        // Auto-skip if already granted
+                        if permissionStatus == .granted {
+                            currentStep = .setup
+                        }
+                    }
+                    .onChange(of: permissionStatus) { newStatus in
+                        if newStatus == .granted {
+                            currentStep = .setup
+                        }
+                    }
                 case .setup:
                     SetupStep(onNext: { currentStep = .done })
                 case .done:
@@ -67,6 +78,13 @@ struct OnboardingView: View {
                 permissionStatus = .notGranted
             }
             isCheckingPermission = false
+        }
+    }
+
+    private func skipToSetupIfGranted() {
+        // If already on permission step and granted, move to setup
+        if currentStep == .permission && permissionStatus == .granted {
+            currentStep = .setup
         }
     }
 
