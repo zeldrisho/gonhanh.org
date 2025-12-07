@@ -219,15 +219,15 @@ class KeyboardHookManager {
             // Show alert and open System Settings
             DispatchQueue.main.async {
                 let alert = NSAlert()
-                alert.messageText = "Cần quyền Input Monitoring"
-                alert.informativeText = "GoNhanh cần quyền Input Monitoring để gõ tiếng Việt.\n\n1. Mở System Settings > Privacy & Security > Input Monitoring\n2. Bật GoNhanh\n3. Khởi động lại app"
+                alert.messageText = "Cần quyền Accessibility"
+                alert.informativeText = "GoNhanh cần quyền Accessibility để gõ tiếng Việt.\n\n1. Mở System Settings > Privacy & Security > Accessibility\n2. Bật GoNhanh\n3. Khởi động lại app"
                 alert.alertStyle = .warning
                 alert.addButton(withTitle: "Mở System Settings")
                 alert.addButton(withTitle: "Hủy")
 
                 if alert.runModal() == .alertFirstButtonReturn {
-                    // Open Input Monitoring settings
-                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
+                    // Open Accessibility settings
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
                         NSWorkspace.shared.open(url)
                     }
                 }
