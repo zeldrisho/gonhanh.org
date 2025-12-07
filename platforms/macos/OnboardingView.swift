@@ -184,12 +184,9 @@ struct PermissionStep: View {
             // Icon based on status
             Group {
                 switch status {
-                case .granted:
+                case .granted, .needsRestart:
                     Image(systemName: "checkmark.shield.fill")
                         .foregroundColor(.green)
-                case .needsRestart:
-                    Image(systemName: "arrow.clockwise.circle.fill")
-                        .foregroundColor(.orange)
                 default:
                     Image(systemName: "lock.shield.fill")
                         .foregroundColor(.accentColor)
