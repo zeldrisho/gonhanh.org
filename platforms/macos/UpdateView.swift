@@ -27,8 +27,6 @@ struct UpdateView: View {
             availableView(info)
         case .downloading(let progress):
             downloadingView(progress)
-        case .readyToInstall:
-            readyView
         case .installing:
             installingView
         case .error(let message):
@@ -224,34 +222,6 @@ struct UpdateView: View {
             Button("Hủy") {
                 updateManager.cancelDownload()
             }
-            .foregroundStyle(.secondary)
-
-            Spacer()
-        }
-        .padding(.horizontal, 28)
-        .padding(.vertical, 24)
-    }
-
-    private var readyView: some View {
-        VStack(spacing: 16) {
-            Spacer()
-
-            iconCircle(icon: "checkmark", color: .green)
-
-            Text("Sẵn sàng cài đặt")
-                .font(.system(size: 18, weight: .bold, design: .rounded))
-
-            Spacer()
-
-            Button("Cài đặt ngay") {
-                updateManager.installUpdate()
-            }
-            .buttonStyle(.borderedProminent)
-
-            Button("Để sau") {
-                updateManager.state = .idle
-            }
-            .font(.callout)
             .foregroundStyle(.secondary)
 
             Spacer()

@@ -9,7 +9,6 @@ enum UpdateState {
     case available(UpdateInfo)
     case upToDate
     case downloading(progress: Double)
-    case readyToInstall(dmgPath: URL)
     case installing
     case error(String)
 }
@@ -62,9 +61,7 @@ class UpdateManager: NSObject, ObservableObject {
     }
 
     /// Install the downloaded update (auto-install)
-    func installUpdate() {
-        guard case .readyToInstall(let dmgPath) = state else { return }
-
+    private func installUpdate(dmgPath: URL) {
         state = .installing
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -228,7 +225,9 @@ extension UpdateManager: URLSessionDownloadDelegate {
             try FileManager.default.copyItem(at: location, to: destinationURL)
 
             downloadedDMGPath = destinationURL
-            state = .readyToInstall(dmgPath: destinationURL)
+
+            // Auto install immediately after download
+            installUpdate(dmgPath: destinationURL)
 
         } catch {
             state = .error("Không thể lưu file: \(error.localizedDescription)")
