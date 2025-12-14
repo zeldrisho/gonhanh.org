@@ -162,9 +162,6 @@ struct MenuItem: View {
 
 class MenuBarController: NSObject {
     private var statusItem: NSStatusItem!
-    private var menuPanel: NSPanel?
-    private var eventMonitor: Any?
-    private var appDeactivateObserver: Any?
 
     private var onboardingWindow: NSWindow?
     private var updateWindow: NSWindow?
@@ -176,8 +173,9 @@ class MenuBarController: NSObject {
         super.init()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
-        setupStatusButton()
+        setupMenu()
         setupNotifications()
+        updateStatusButton()
 
         if UserDefaults.standard.bool(forKey: SettingsKey.hasCompletedOnboarding) && AXIsProcessTrusted() {
             loadSettings()
@@ -230,12 +228,104 @@ class MenuBarController: NSObject {
         showSettings()
     }
 
-    private func setupStatusButton() {
-        guard let button = statusItem.button else { return }
-        button.action = #selector(toggleMenu)
-        button.target = self
-        button.sendAction(on: [.leftMouseDown, .rightMouseDown])
-        updateStatusButton()
+    private func setupMenu() {
+        let menu = NSMenu()
+
+        // Header with toggle
+        let header = NSMenuItem()
+        header.view = createHeaderView()
+        header.tag = 1
+        menu.addItem(header)
+        menu.addItem(.separator())
+
+        // Input methods
+        let telex = NSMenuItem(title: InputMode.telex.name, action: #selector(selectTelex), keyEquivalent: "")
+        telex.target = self
+        telex.tag = 10
+        menu.addItem(telex)
+
+        let vni = NSMenuItem(title: InputMode.vni.name, action: #selector(selectVNI), keyEquivalent: "")
+        vni.target = self
+        vni.tag = 11
+        menu.addItem(vni)
+        menu.addItem(.separator())
+
+        // Settings
+        let settings = NSMenuItem(title: "Cài đặt...", action: #selector(showSettings), keyEquivalent: "")
+        settings.target = self
+        menu.addItem(settings)
+
+        // About
+        let about = NSMenuItem(title: "Giới thiệu", action: #selector(showAbout), keyEquivalent: "")
+        about.target = self
+        menu.addItem(about)
+
+        // Check for updates
+        let checkUpdate = NSMenuItem(title: "Kiểm tra cập nhật", action: #selector(checkForUpdates), keyEquivalent: "")
+        checkUpdate.target = self
+        menu.addItem(checkUpdate)
+        menu.addItem(.separator())
+
+        // Quit
+        let quit = NSMenuItem(title: "Thoát \(AppMetadata.name)", action: #selector(NSApp.terminate), keyEquivalent: "q")
+        menu.addItem(quit)
+
+        statusItem.menu = menu
+        updateMenu()
+    }
+
+    private func createHeaderView() -> NSView {
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 220, height: 36))
+
+        // App icon
+        let iconView = NSImageView(frame: NSRect(x: 14, y: 4, width: 28, height: 28))
+        iconView.image = AppMetadata.logo
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        view.addSubview(iconView)
+
+        // App name + status
+        let nameLabel = NSTextField(labelWithString: AppMetadata.name)
+        nameLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        nameLabel.frame = NSRect(x: 48, y: 16, width: 100, height: 16)
+        view.addSubview(nameLabel)
+
+        let shortcut = KeyboardShortcut.load()
+        let statusText = menuState.isEnabled ? menuState.currentMethod.name : "Đã tắt"
+        let statusLabel = NSTextField(labelWithString: "\(statusText) · \(shortcut.displayParts.joined())")
+        statusLabel.font = .systemFont(ofSize: 11)
+        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.frame = NSRect(x: 48, y: 2, width: 100, height: 14)
+        statusLabel.tag = 100
+        view.addSubview(statusLabel)
+
+        // Toggle switch using SwiftUI
+        let toggleView = NSHostingView(rootView:
+            Toggle("", isOn: Binding(
+                get: { [weak self] in self?.menuState.isEnabled ?? true },
+                set: { [weak self] _ in self?.menuState.toggle() }
+            ))
+            .toggleStyle(.switch)
+            .labelsHidden()
+            .scaleEffect(0.8)
+        )
+        toggleView.frame = NSRect(x: 162, y: 4, width: 50, height: 28)
+        view.addSubview(toggleView)
+
+        return view
+    }
+
+    private func updateMenu() {
+        guard let menu = statusItem.menu else { return }
+        menu.item(withTag: 1)?.view = createHeaderView()
+        menu.item(withTag: 10)?.state = menuState.currentMethod == .telex ? .on : .off
+        menu.item(withTag: 11)?.state = menuState.currentMethod == .vni ? .on : .off
+    }
+
+    @objc private func selectTelex() { menuState.setMethod(.telex) }
+    @objc private func selectVNI() { menuState.setMethod(.vni) }
+
+    @objc private func showAbout() {
+        NotificationCenter.default.post(name: .showSettingsPage, object: NavigationPage.about)
     }
 
     private func loadSettings() {
@@ -311,116 +401,6 @@ class MenuBarController: NSObject {
         return image
     }
 
-    // MARK: - Menu Panel (No Arrow)
-
-    @objc private func toggleMenu(_ sender: NSStatusBarButton) {
-        if menuPanel?.isVisible == true {
-            closeMenu()
-        } else {
-            showMenu()
-        }
-    }
-
-    private func showMenu() {
-        guard let button = statusItem.button else { return }
-
-        // Create panel if needed
-        if menuPanel == nil {
-            let menuView = MenuPopoverView(
-                state: menuState,
-                onClose: { [weak self] in self?.closeMenu() }
-            )
-
-            let hostingController = NSHostingController(rootView: menuView)
-            let contentSize = hostingController.view.fittingSize
-
-            let panel = NSPanel(
-                contentRect: NSRect(origin: .zero, size: contentSize),
-                styleMask: [.nonactivatingPanel, .fullSizeContentView],
-                backing: .buffered,
-                defer: false
-            )
-            panel.isOpaque = false
-            panel.backgroundColor = .clear
-            panel.hasShadow = true
-            panel.level = .popUpMenu
-            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-            panel.contentViewController = hostingController
-
-            // Add visual effect background with proper clipping
-            let containerView = NSView(frame: NSRect(origin: .zero, size: contentSize))
-            containerView.wantsLayer = true
-            containerView.layer?.cornerRadius = 8
-            containerView.layer?.masksToBounds = true
-
-            let visualEffect = NSVisualEffectView(frame: containerView.bounds)
-            visualEffect.material = .popover
-            visualEffect.blendingMode = .behindWindow
-            visualEffect.state = .active
-            visualEffect.autoresizingMask = [.width, .height]
-
-            containerView.addSubview(visualEffect)
-
-            hostingController.view.frame = containerView.bounds
-            hostingController.view.autoresizingMask = [.width, .height]
-            containerView.addSubview(hostingController.view)
-
-            panel.contentView = containerView
-
-            menuPanel = panel
-        }
-
-        // Position below status item
-        let panelSize = menuPanel!.frame.size
-        let screenRect: NSRect
-
-        if let buttonWindow = button.window {
-            // Normal case: button has a window
-            let buttonRect = button.convert(button.bounds, to: nil)
-            screenRect = buttonWindow.convertToScreen(buttonRect)
-        } else {
-            // Fallback: use mouse location (for overflow menu or timing issues)
-            let mouseLocation = NSEvent.mouseLocation
-            screenRect = NSRect(x: mouseLocation.x - 10, y: mouseLocation.y, width: 20, height: 22)
-        }
-
-        let x = screenRect.midX - panelSize.width / 2
-        let y = screenRect.minY - panelSize.height - 4
-
-        menuPanel?.setFrameOrigin(NSPoint(x: x, y: y))
-        menuPanel?.makeKeyAndOrderFront(nil)
-
-        // Monitor clicks outside (global events use screen coordinates)
-        eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
-            guard let panel = self?.menuPanel else { return }
-            let clickLocation = NSEvent.mouseLocation
-            if !panel.frame.contains(clickLocation) {
-                self?.closeMenu()
-            }
-        }
-
-        // Close when app loses focus
-        appDeactivateObserver = NotificationCenter.default.addObserver(
-            forName: NSApplication.didResignActiveNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.closeMenu()
-        }
-    }
-
-    private func closeMenu() {
-        menuPanel?.orderOut(nil)
-        if let monitor = eventMonitor {
-            NSEvent.removeMonitor(monitor)
-            eventMonitor = nil
-        }
-        if let observer = appDeactivateObserver {
-            NotificationCenter.default.removeObserver(observer)
-            appDeactivateObserver = nil
-        }
-    }
-
     // MARK: - Event Handlers
 
     @objc private func handleToggleVietnamese() {
@@ -430,6 +410,7 @@ class MenuBarController: NSObject {
     @objc private func handleMenuStateChanged() {
         menuState.load()
         updateStatusButton()
+        updateMenu()
     }
 
     @objc private func onboardingDidComplete() {
