@@ -1,5 +1,6 @@
 import Cocoa
 import SwiftUI
+import Combine
 
 // MARK: - Notifications
 
@@ -19,6 +20,7 @@ class MenuBarController: NSObject, NSWindowDelegate {
 
     private let appState = AppState.shared
     private var updateStateObserver: NSObjectProtocol?
+    private var cancellables = Set<AnyCancellable>()
 
     override init() {
         super.init()
@@ -87,6 +89,15 @@ class MenuBarController: NSObject, NSWindowDelegate {
         ) { [weak self] _ in
             self?.updateMenu()
         }
+
+        // Observe AppState.isEnabled changes via Combine for app switch updates
+        appState.$isEnabled
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.updateStatusButton()
+                self?.updateMenu()
+            }
+            .store(in: &cancellables)
     }
 
     @objc private func handleShowSettingsPage() {
@@ -248,10 +259,9 @@ class MenuBarController: NSObject, NSWindowDelegate {
         RustBridge.setEnabled(appState.isEnabled)
         RustBridge.setMethod(appState.currentMethod.rawValue)
 
-        // Sync shortcuts and excluded apps (use AppState's centralized methods)
+        // Sync shortcuts and start per-app mode manager
         appState.syncShortcutsToEngine()
-        appState.syncExcludedAppsToEngine()
-        ExcludedAppsManager.shared.start()
+        PerAppModeManager.shared.start()
 
         // Reopen settings if coming from update
         if UserDefaults.standard.bool(forKey: SettingsKey.reopenSettingsAfterUpdate) {
@@ -269,9 +279,11 @@ class MenuBarController: NSObject, NSWindowDelegate {
     // MARK: - Status Button
 
     private func updateStatusButton() {
-        guard let button = statusItem.button else { return }
-        button.title = ""
-        button.image = createStatusIcon(text: appState.isEnabled ? "V" : "E")
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, let button = self.statusItem.button else { return }
+            button.title = ""
+            button.image = self.createStatusIcon(text: self.appState.isEnabled ? "V" : "E")
+        }
     }
 
     private func createStatusIcon(text: String) -> NSImage {
@@ -317,7 +329,6 @@ class MenuBarController: NSObject, NSWindowDelegate {
     }
 
     @objc private func handleMenuStateChanged() {
-        // AppState already updated via didSet - just refresh UI
         updateStatusButton()
         updateMenu()
     }

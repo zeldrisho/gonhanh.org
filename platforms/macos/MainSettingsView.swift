@@ -41,11 +41,25 @@ enum UpdateStatus: Equatable {
 class AppState: ObservableObject {
     static let shared = AppState()
 
+    // Flag for silent updates (from app switch) - won't trigger save
+    private var isSilentUpdate = false
+
     @Published var isEnabled: Bool {
         didSet {
-            UserDefaults.standard.set(isEnabled, forKey: SettingsKey.enabled)
+            // Always sync engine and update icon
             RustBridge.setEnabled(isEnabled)
             NotificationCenter.default.post(name: .menuStateChanged, object: nil)
+
+            // Skip save when silent update (from app switch restore)
+            guard !isSilentUpdate else { return }
+
+            UserDefaults.standard.set(isEnabled, forKey: SettingsKey.enabled)
+
+            // Save for current app if smart mode enabled
+            if isSmartModeEnabled,
+               let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier {
+                savePerAppMode(bundleId: bundleId, enabled: isEnabled)
+            }
         }
     }
 
@@ -54,6 +68,13 @@ class AppState: ObservableObject {
             UserDefaults.standard.set(currentMethod.rawValue, forKey: SettingsKey.method)
             RustBridge.setMethod(currentMethod.rawValue)
             NotificationCenter.default.post(name: .menuStateChanged, object: nil)
+        }
+    }
+
+    /// Smart mode: automatically remember ON/OFF state per app
+    @Published var isSmartModeEnabled: Bool = true {
+        didSet {
+            UserDefaults.standard.set(isSmartModeEnabled, forKey: SettingsKey.smartModeEnabled)
         }
     }
 
@@ -83,88 +104,47 @@ class AppState: ObservableObject {
         ShortcutItem(key: "tphcm", value: "Thành phố Hồ Chí Minh", isEnabled: false)
     ]
 
-    @Published var excludedApps: [ExcludedApp] = []
-
-    // Dev apps that typically don't need Vietnamese input
-    // enabledByDefault: false = app appears in list but toggle is OFF (user must enable manually)
-    private static let defaultExcludedApps: [(bundleId: String, name: String, path: String, enabledByDefault: Bool)] = [
-        ("com.googlecode.iterm2", "iTerm", "/Applications/iTerm.app", false),
-        ("com.microsoft.VSCode", "Visual Studio Code", "/Applications/Visual Studio Code.app", false),
-        ("com.tinyapp.TablePlus", "TablePlus", "/Applications/TablePlus.app", false),
-        ("com.jetbrains.datagrip", "DataGrip", "/Applications/DataGrip.app", false),
-        ("com.apple.dt.Xcode", "Xcode", "/Applications/Xcode.app", false),
-        ("com.sequel-ace.sequel-ace", "Sequel Ace", "/Applications/Sequel Ace.app", false),
-        ("com.postmanlabs.mac", "Postman", "/Applications/Postman.app", false),
-        ("com.apple.Terminal", "Terminal", "/System/Applications/Utilities/Terminal.app", false),
-        ("com.termius-dmg.mac", "Termius", "/Applications/Termius.app", false),
-    ]
-
     init() {
         isEnabled = UserDefaults.standard.object(forKey: SettingsKey.enabled) as? Bool ?? true
         currentMethod = InputMode(rawValue: UserDefaults.standard.integer(forKey: SettingsKey.method)) ?? .telex
         toggleShortcut = KeyboardShortcut.load()
-        excludedApps = Self.loadExcludedApps()
+
+        // Smart mode (default true for new installs)
+        if UserDefaults.standard.object(forKey: SettingsKey.smartModeEnabled) == nil {
+            isSmartModeEnabled = true
+            UserDefaults.standard.set(true, forKey: SettingsKey.smartModeEnabled)
+        } else {
+            isSmartModeEnabled = UserDefaults.standard.bool(forKey: SettingsKey.smartModeEnabled)
+        }
+
         checkForUpdates()
         setupObservers()
     }
 
-    /// Load excluded apps: detect installed apps and apply persisted user preferences
-    private static func loadExcludedApps() -> [ExcludedApp] {
-        let fileManager = FileManager.default
-        let savedPrefs = UserDefaults.standard.dictionary(forKey: SettingsKey.excludedApps) as? [String: Bool] ?? [:]
-        let defaultBundleIds = Set(defaultExcludedApps.map { $0.bundleId })
+    // MARK: - Per-App Mode (only stores OFF apps, default is ON)
 
-        // Load default apps (only if installed)
-        var apps = defaultExcludedApps.compactMap { app -> ExcludedApp? in
-            guard fileManager.fileExists(atPath: app.path) else { return nil }
-            let isEnabled = savedPrefs[app.bundleId] ?? app.enabledByDefault
-            return ExcludedApp(
-                bundleId: app.bundleId,
-                name: app.name,
-                icon: NSWorkspace.shared.icon(forFile: app.path),
-                isEnabled: isEnabled
-            )
+    /// Save per-app mode: only store OFF apps, remove entry when ON (default)
+    func savePerAppMode(bundleId: String, enabled: Bool) {
+        var modes = UserDefaults.standard.dictionary(forKey: SettingsKey.perAppModes) as? [String: Bool] ?? [:]
+        if enabled {
+            modes.removeValue(forKey: bundleId)  // ON is default, no need to store
+        } else {
+            modes[bundleId] = false  // Only store OFF apps
         }
-
-        // Load user-added custom apps
-        if let customApps = UserDefaults.standard.array(forKey: SettingsKey.customExcludedApps) as? [[String: Any]] {
-            for appData in customApps {
-                guard let bundleId = appData["bundleId"] as? String,
-                      let name = appData["name"] as? String,
-                      let path = appData["path"] as? String,
-                      !defaultBundleIds.contains(bundleId),
-                      fileManager.fileExists(atPath: path) else { continue }
-                let isEnabled = savedPrefs[bundleId] ?? true
-                apps.append(ExcludedApp(
-                    bundleId: bundleId,
-                    name: name,
-                    icon: NSWorkspace.shared.icon(forFile: path),
-                    isEnabled: isEnabled
-                ))
-            }
-        }
-
-        return apps
+        UserDefaults.standard.set(modes, forKey: SettingsKey.perAppModes)
     }
 
-    /// Save excluded apps preferences to UserDefaults
-    private func saveExcludedAppsPreferences() {
-        let defaultBundleIds = Set(Self.defaultExcludedApps.map { $0.bundleId })
+    /// Get per-app mode: returns true (ON) if not stored
+    func getPerAppMode(bundleId: String) -> Bool {
+        let modes = UserDefaults.standard.dictionary(forKey: SettingsKey.perAppModes) as? [String: Bool] ?? [:]
+        return modes[bundleId] ?? true  // Default ON
+    }
 
-        // Save isEnabled preferences for all apps
-        let prefs = excludedApps.reduce(into: [String: Bool]()) { dict, app in
-            dict[app.bundleId] = app.isEnabled
-        }
-        UserDefaults.standard.set(prefs, forKey: SettingsKey.excludedApps)
-
-        // Save custom apps (not in default list) with their paths
-        let customApps: [[String: Any]] = excludedApps.compactMap { app in
-            guard !defaultBundleIds.contains(app.bundleId) else { return nil }
-            // Find path from workspace
-            let path = NSWorkspace.shared.urlForApplication(withBundleIdentifier: app.bundleId)?.path ?? ""
-            return ["bundleId": app.bundleId, "name": app.name, "path": path]
-        }
-        UserDefaults.standard.set(customApps, forKey: SettingsKey.customExcludedApps)
+    /// Silent update (from app switch) - won't trigger save, but still updates UI via Combine
+    func setEnabledSilently(_ enabled: Bool) {
+        isSilentUpdate = true
+        isEnabled = enabled
+        isSilentUpdate = false
     }
 
     private func setupObservers() {
@@ -174,12 +154,6 @@ class AppState: ObservableObject {
             .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
             .sink { [weak self] _ in self?.syncShortcutsToEngine() }
             .store(in: &cancellables)
-
-        $excludedApps
-            .dropFirst()
-            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
-            .sink { [weak self] _ in self?.syncExcludedAppsToEngine() }
-            .store(in: &cancellables)
     }
 
     private var cancellables = Set<AnyCancellable>()
@@ -188,13 +162,6 @@ class AppState: ObservableObject {
     func syncShortcutsToEngine() {
         let data = shortcuts.map { ($0.key, $0.value, $0.isEnabled) }
         RustBridge.syncShortcuts(data)
-    }
-
-    /// Sync excluded apps to manager and persist preferences
-    func syncExcludedAppsToEngine() {
-        let bundleIds = excludedApps.filter { $0.isEnabled }.map { $0.bundleId }
-        ExcludedAppsManager.shared.setExcludedApps(bundleIds)
-        saveExcludedAppsPreferences()
     }
 
     func checkForUpdates() {
@@ -223,14 +190,6 @@ struct ShortcutItem: Identifiable {
     let id = UUID()
     var key: String
     var value: String
-    var isEnabled: Bool = true
-}
-
-struct ExcludedApp: Identifiable {
-    let id = UUID()
-    var bundleId: String
-    var name: String
-    var icon: NSImage?
     var isEnabled: Bool = true
 }
 
@@ -454,7 +413,6 @@ struct SettingsPageView: View {
     @ObservedObject var appState: AppState
     @State private var isRecordingShortcut = false
     @State private var selectedShortcutId: UUID?
-    @State private var selectedAppId: UUID?
     @FocusState private var focusedField: UUID?
 
     var body: some View {
@@ -508,6 +466,33 @@ struct SettingsPageView: View {
                     .stroke(Color(NSColor.separatorColor).opacity(0.5), lineWidth: 0.5)
             )
 
+            // Smart Mode section
+            VStack(spacing: 0) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Chuyển chế độ thông minh")
+                            .font(.system(size: 13))
+                        Text("Tự động nhớ trạng thái cho từng ứng dụng")
+                            .font(.system(size: 11))
+                            .foregroundColor(Color(NSColor.secondaryLabelColor))
+                    }
+                    Spacer()
+                    Toggle("", isOn: $appState.isSmartModeEnabled)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color(NSColor.controlBackgroundColor).opacity(0.5))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Color(NSColor.separatorColor).opacity(0.5), lineWidth: 0.5)
+            )
+
             // Shortcuts section
             SectionView(title: "TỪ VIẾT TẮT") {
                 if appState.shortcuts.isEmpty {
@@ -520,7 +505,6 @@ struct SettingsPageView: View {
                             focusedField: $focusedField
                         ) {
                             selectedShortcutId = shortcut.id
-                            selectedAppId = nil
                         }
                         if shortcut.id != appState.shortcuts.last?.id {
                             Divider()
@@ -547,36 +531,6 @@ struct SettingsPageView: View {
                 )
             }
 
-            // Excluded apps section
-            SectionView(title: "ỨNG DỤNG BỎ QUA") {
-                if appState.excludedApps.isEmpty {
-                    EmptyStateView(icon: "app.dashed", text: "Chưa có ứng dụng")
-                } else {
-                    ForEach($appState.excludedApps) { $app in
-                        ExcludedAppRow(app: $app, isSelected: selectedAppId == app.id) {
-                            selectedAppId = app.id
-                            selectedShortcutId = nil
-                        }
-                        if app.id != appState.excludedApps.last?.id {
-                            Divider()
-                        }
-                    }
-                }
-
-                Divider()
-                AddRemoveButtons(
-                    onAdd: { showAppPicker() },
-                    onRemove: {
-                        if let id = selectedAppId,
-                           let idx = appState.excludedApps.firstIndex(where: { $0.id == id }) {
-                            appState.excludedApps.remove(at: idx)
-                            selectedAppId = appState.excludedApps.last?.id
-                        }
-                    },
-                    removeDisabled: appState.excludedApps.isEmpty
-                )
-            }
-
             Spacer()
         }
         .contentShape(Rectangle())
@@ -586,28 +540,8 @@ struct SettingsPageView: View {
 
     private func clearSelection() {
         selectedShortcutId = nil
-        selectedAppId = nil
         focusedField = nil
         NSApp.keyWindow?.makeFirstResponder(nil)
-    }
-
-    private func showAppPicker() {
-        let panel = NSOpenPanel()
-        panel.title = "Chọn ứng dụng"
-        panel.allowedContentTypes = [.application]
-        panel.allowsMultipleSelection = false
-        panel.directoryURL = URL(fileURLWithPath: "/Applications")
-
-        if panel.runModal() == .OK, let url = panel.url {
-            let name = url.deletingPathExtension().lastPathComponent
-            let icon = NSWorkspace.shared.icon(forFile: url.path)
-            let bundleId = Bundle(url: url)?.bundleIdentifier ?? url.lastPathComponent
-
-            // Check if already added
-            if !appState.excludedApps.contains(where: { $0.bundleId == bundleId }) {
-                appState.excludedApps.append(ExcludedApp(bundleId: bundleId, name: name, icon: icon))
-            }
-        }
     }
 }
 
@@ -875,43 +809,6 @@ struct ShortcutRow: View {
                 .textFieldStyle(.plain)
             Spacer()
             Toggle("", isOn: $shortcut.isEnabled)
-                .toggleStyle(.switch)
-                .labelsHidden()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
-        .contentShape(Rectangle())
-        .onTapGesture { onSelect() }
-    }
-}
-
-struct ExcludedAppRow: View {
-    @Binding var app: ExcludedApp
-    var isSelected: Bool
-    var onSelect: () -> Void
-
-    var body: some View {
-        HStack(spacing: 12) {
-            if let icon = app.icon {
-                Image(nsImage: icon)
-                    .resizable()
-                    .frame(width: 24, height: 24)
-            } else {
-                Image(systemName: "app.fill")
-                    .font(.system(size: 20))
-                    .foregroundColor(Color(NSColor.secondaryLabelColor))
-                    .frame(width: 24, height: 24)
-            }
-
-            Text(app.name)
-                .font(.system(size: 13))
-                .foregroundColor(Color(NSColor.labelColor))
-                .lineLimit(1)
-
-            Spacer()
-
-            Toggle("", isOn: $app.isEnabled)
                 .toggleStyle(.switch)
                 .labelsHidden()
         }

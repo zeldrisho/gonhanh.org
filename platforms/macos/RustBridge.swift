@@ -465,11 +465,6 @@ private func keyboardCallback(
     let caps = shift || flags.contains(.maskAlphaShift)
     let ctrl = flags.contains(.maskCommand) || flags.contains(.maskControl) || flags.contains(.maskAlternate)
 
-    // Skip Vietnamese input for excluded apps (keystroke-level check for reliability)
-    if ExcludedAppsManager.shared.isFrontmostAppExcluded() {
-        return Unmanaged.passUnretained(event)
-    }
-
     if let (bs, chars) = RustBridge.processKey(keyCode: keyCode, caps: caps, ctrl: ctrl, shift: shift) {
         let str = String(chars)
         Log.transform(bs, str)
@@ -568,84 +563,52 @@ private func sendReplacement(backspace bs: Int, chars: [Character], proxy: CGEve
     TextInjector.shared.injectSync(bs: bs, text: str, method: method, delays: delays, proxy: proxy)
 }
 
-// MARK: - Excluded Apps Manager
+// MARK: - Per-App Mode Manager
 
-class ExcludedAppsManager {
-    static let shared = ExcludedAppsManager()
+class PerAppModeManager {
+    static let shared = PerAppModeManager()
 
-    private var excludedBundleIds: Set<String> = []
-    private var appObserver: NSObjectProtocol?
-    private var wasEnabledBeforeExclusion = true
+    private var currentBundleId: String?
+    private var observer: NSObjectProtocol?
 
     private init() {}
 
     /// Start observing frontmost app changes
     func start() {
-        appObserver = NSWorkspace.shared.notificationCenter.addObserver(
+        // IMPORTANT: NSWorkspace notifications are posted to NSWorkspace.shared.notificationCenter,
+        // NOT NotificationCenter.default!
+        observer = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
             queue: .main
         ) { [weak self] notification in
-            self?.handleAppChange(notification)
+            guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  let bundleId = app.bundleIdentifier else { return }
+            self?.handleAppSwitch(bundleId)
         }
-        Log.info("ExcludedAppsManager started")
+        Log.info("PerAppModeManager started")
     }
 
     /// Stop observing
     func stop() {
-        if let observer = appObserver {
+        if let observer = observer {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
-            appObserver = nil
+            self.observer = nil
         }
     }
 
-    /// Update the list of excluded bundle IDs
-    func setExcludedApps(_ bundleIds: [String]) {
-        excludedBundleIds = Set(bundleIds)
-        Log.info("Excluded apps updated: \(bundleIds.count) apps")
-        // Re-check current app
-        checkCurrentApp()
-    }
+    private func handleAppSwitch(_ bundleId: String) {
+        guard bundleId != currentBundleId else { return }
+        currentBundleId = bundleId
 
-    /// Check if frontmost app is excluded (called on every keystroke for reliability)
-    func isFrontmostAppExcluded() -> Bool {
-        guard !excludedBundleIds.isEmpty,
-              let app = NSWorkspace.shared.frontmostApplication,
-              let bundleId = app.bundleIdentifier else { return false }
-        return excludedBundleIds.contains(bundleId)
-    }
+        RustBridge.clearBuffer()
 
-    /// Check if current frontmost app should be excluded
-    private func checkCurrentApp() {
-        guard let app = NSWorkspace.shared.frontmostApplication,
-              let bundleId = app.bundleIdentifier else { return }
-        handleBundleId(bundleId)
-    }
+        guard AppState.shared.isSmartModeEnabled else { return }
 
-    private func handleAppChange(_ notification: Notification) {
-        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-              let bundleId = app.bundleIdentifier else { return }
-        handleBundleId(bundleId)
-    }
-
-    private func handleBundleId(_ bundleId: String) {
-        let isExcluded = excludedBundleIds.contains(bundleId)
-        if isExcluded {
-            // Store current enabled state before disabling
-            wasEnabledBeforeExclusion = AppState.shared.isEnabled
-            if AppState.shared.isEnabled {
-                RustBridge.setEnabled(false)
-                RustBridge.clearBuffer()  // Clear buffer to prevent stale state
-                Log.info("App excluded: \(bundleId) - IME disabled")
-            }
-        } else {
-            // Restore previous state when switching to non-excluded app
-            if wasEnabledBeforeExclusion {
-                RustBridge.clearBuffer()  // Clear buffer before re-enabling
-                RustBridge.setEnabled(AppState.shared.isEnabled)
-                Log.info("App active: \(bundleId) - IME restored")
-            }
-        }
+        // Restore saved mode (default ON, only OFF apps are stored)
+        let mode = AppState.shared.getPerAppMode(bundleId: bundleId)
+        RustBridge.setEnabled(mode)
+        AppState.shared.setEnabledSilently(mode)
     }
 }
 
@@ -655,6 +618,5 @@ extension Notification.Name {
     static let toggleVietnamese = Notification.Name("toggleVietnamese")
     static let showUpdateWindow = Notification.Name("showUpdateWindow")
     static let shortcutChanged = Notification.Name("shortcutChanged")
-    static let excludedAppsChanged = Notification.Name("excludedAppsChanged")
     static let updateStateChanged = Notification.Name("updateStateChanged")
 }

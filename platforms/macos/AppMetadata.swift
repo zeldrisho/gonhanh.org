@@ -71,8 +71,8 @@ enum SettingsKey {
     static let permissionGranted = "gonhanh.permission.granted"
     static let toggleShortcut = "gonhanh.shortcut.toggle"
     static let reopenSettingsAfterUpdate = "gonhanh.update.reopenSettings"
-    static let excludedApps = "gonhanh.excludedApps"
-    static let customExcludedApps = "gonhanh.customExcludedApps"
+    static let smartModeEnabled = "gonhanh.smartMode.enabled"
+    static let perAppModes = "gonhanh.perAppModes"
 }
 
 // MARK: - Keyboard Shortcut Model
