@@ -216,6 +216,9 @@ private struct ImeResult {
 @_silgen_name("ime_remove_shortcut") private func ime_remove_shortcut(_ trigger: UnsafePointer<CChar>?)
 @_silgen_name("ime_clear_shortcuts") private func ime_clear_shortcuts()
 
+// Word Restore FFI
+@_silgen_name("ime_restore_word") private func ime_restore_word(_ word: UnsafePointer<CChar>?)
+
 // MARK: - RustBridge (Public API)
 
 class RustBridge {
@@ -260,6 +263,14 @@ class RustBridge {
     }
 
     static func clearBuffer() { ime_clear() }
+
+    /// Restore buffer from a Vietnamese word (for backspace-into-word editing)
+    static func restoreWord(_ word: String) {
+        word.withCString { w in
+            ime_restore_word(w)
+        }
+        Log.info("Restored word: \(word)")
+    }
 
     // MARK: - Shortcuts
 
@@ -381,6 +392,111 @@ private var isRecordingShortcut = false
 private var recordingModifiers: CGEventFlags = []
 private var shortcutObserver: NSObjectProtocol?
 
+// MARK: - Word Restore Support
+
+/// Get word that we're about to backspace into
+/// Returns the word only if cursor is right after a space/punctuation that follows a word
+/// This ensures we only restore when actually entering a word, not when deleting within a word
+private func getWordToRestoreOnBackspace() -> String? {
+    let systemWide = AXUIElementCreateSystemWide()
+    var focused: CFTypeRef?
+
+    guard AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+          let el = focused else {
+        Log.info("restore: no focused element")
+        return nil
+    }
+
+    let axEl = el as! AXUIElement
+
+    // Get text value
+    var textValue: CFTypeRef?
+    let textResult = AXUIElementCopyAttributeValue(axEl, kAXValueAttribute as CFString, &textValue)
+    guard textResult == .success, let text = textValue as? String, !text.isEmpty else {
+        Log.info("restore: no text value (err=\(textResult.rawValue))")
+        return nil
+    }
+
+    // Get selected text range (cursor position)
+    var rangeValue: CFTypeRef?
+    let rangeResult = AXUIElementCopyAttributeValue(axEl, kAXSelectedTextRangeAttribute as CFString, &rangeValue)
+    guard rangeResult == .success else {
+        Log.info("restore: no range (err=\(rangeResult.rawValue))")
+        return nil
+    }
+
+    // Extract range from AXValue
+    var range = CFRange(location: 0, length: 0)
+    guard AXValueGetValue(rangeValue as! AXValue, .cfRange, &range) else {
+        Log.info("restore: can't extract range")
+        return nil
+    }
+
+    let cursorPos = range.location
+    Log.info("restore: cursor=\(cursorPos) text='\(text.prefix(50))...'")
+    guard cursorPos > 0 else { return nil }
+
+    let textChars = Array(text)
+    guard cursorPos <= textChars.count else {
+        Log.info("restore: cursor out of bounds")
+        return nil
+    }
+    let charBeforeCursor = textChars[cursorPos - 1]
+    Log.info("restore: charBefore='\(charBeforeCursor)'")
+
+    // Only restore if we're about to delete the LAST space/punctuation before a word
+    // i.e., cursor is at: "word |" (about to delete space and enter "word")
+    guard charBeforeCursor.isWhitespace || charBeforeCursor.isPunctuation else {
+        Log.info("restore: not at word boundary")
+        return nil
+    }
+
+    // Check if there's a word before this space (not more spaces)
+    var wordEnd = cursorPos - 1
+
+    // Skip all trailing spaces/punctuation to find the word
+    while wordEnd > 0 && (textChars[wordEnd - 1].isWhitespace || textChars[wordEnd - 1].isPunctuation) {
+        wordEnd -= 1
+    }
+
+    guard wordEnd > 0 else {
+        Log.info("restore: no word before spaces")
+        return nil
+    }
+
+    // But we only want to restore when deleting THE LAST space before the word
+    // If there are more spaces between cursor and word, don't restore yet
+    if wordEnd < cursorPos - 1 {
+        Log.info("restore: multiple spaces before word")
+        return nil  // More than one space/punct between cursor and word
+    }
+
+    // Find start of word
+    var wordStart = wordEnd
+    while wordStart > 0 && !textChars[wordStart - 1].isWhitespace && !textChars[wordStart - 1].isPunctuation {
+        wordStart -= 1
+    }
+
+    // Extract word
+    let word = String(textChars[wordStart..<wordEnd])
+    guard !word.isEmpty else { return nil }
+
+    // Only return if it looks like Vietnamese (has diacritics or is pure ASCII letters)
+    let hasVietnameseDiacritics = word.contains { c in
+        let scalars = c.unicodeScalars
+        return scalars.first.map { $0.value >= 0x00C0 && $0.value <= 0x1EF9 } ?? false
+    }
+    let isPureASCIILetters = word.allSatisfy { $0.isLetter && $0.isASCII }
+
+    if hasVietnameseDiacritics || isPureASCIILetters {
+        Log.info("restore: found word '\(word)'")
+        return word
+    }
+
+    Log.info("restore: word '\(word)' not Vietnamese")
+    return nil
+}
+
 private extension CGEventFlags {
     var modifierCount: Int {
         [contains(.maskControl), contains(.maskAlternate), contains(.maskShift), contains(.maskCommand)].filter { $0 }.count
@@ -492,6 +608,28 @@ private func keyboardCallback(
     let shift = flags.contains(.maskShift)
     let caps = shift || flags.contains(.maskAlphaShift)
     let ctrl = flags.contains(.maskCommand) || flags.contains(.maskControl) || flags.contains(.maskAlternate)
+
+    // Backspace handling: try to restore word from screen when backspacing into it
+    // This enables editing marks on previously committed words
+    if keyCode == KeyCode.backspace && !ctrl {
+        // First try Rust engine (handles immediate backspace-after-space)
+        if let (bs, chars) = RustBridge.processKey(keyCode: keyCode, caps: caps, ctrl: ctrl, shift: shift) {
+            let str = String(chars)
+            Log.transform(bs, str)
+            sendReplacement(backspace: bs, chars: chars, proxy: proxy)
+            return nil
+        }
+
+        // Engine returned none - try to restore word from screen
+        // This handles: "chào " + backspace to delete space and enter word
+        if let word = getWordToRestoreOnBackspace() {
+            RustBridge.restoreWord(word)
+            Log.info("Restored word from screen: \(word)")
+        }
+
+        // Pass through backspace to delete the character
+        return Unmanaged.passUnretained(event)
+    }
 
     if let (bs, chars) = RustBridge.processKey(keyCode: keyCode, caps: caps, ctrl: ctrl, shift: shift) {
         let str = String(chars)
