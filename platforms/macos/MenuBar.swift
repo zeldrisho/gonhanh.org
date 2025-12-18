@@ -340,7 +340,11 @@ class MenuBarController: NSObject, NSWindowDelegate {
     }
 
     private func enableLaunchAtLogin() {
-        LaunchAtLoginManager.shared.enable { _ in }
+        do {
+            try LaunchAtLoginManager.shared.enable()
+        } catch {
+            print("[LaunchAtLogin] Error: \(error)")
+        }
     }
 
     // MARK: - Windows

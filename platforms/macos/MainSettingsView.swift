@@ -107,8 +107,11 @@ class AppState: ObservableObject {
 
     @Published var shortcuts: [ShortcutItem] = []
 
-    /// Launch at Login status: nil = checking, true = enabled, false = disabled
-    @Published var isLaunchAtLoginEnabled: Bool? = nil
+    /// Launch at Login status (auto-refreshed)
+    @Published var isLaunchAtLoginEnabled: Bool = false
+
+    /// Timer for refreshing launch at login status
+    private var launchAtLoginTimer: Timer?
 
     init() {
         isEnabled = UserDefaults.standard.object(forKey: SettingsKey.enabled) as? Bool ?? true
@@ -148,23 +151,40 @@ class AppState: ObservableObject {
 
         checkForUpdates()
         setupObservers()
+        setupLaunchAtLoginMonitoring()
     }
 
-    /// Refresh launch at login status from system (async)
-    func refreshLaunchAtLoginStatus() {
-        LaunchAtLoginManager.shared.checkStatus { [weak self] enabled in
-            self?.isLaunchAtLoginEnabled = enabled
+    // MARK: - Launch at Login Monitoring
+
+    /// Start monitoring launch at login status
+    private func setupLaunchAtLoginMonitoring() {
+        // Initial check
+        isLaunchAtLoginEnabled = LaunchAtLoginManager.shared.isEnabled
+
+        // Refresh every 2 seconds (user may toggle in System Settings)
+        launchAtLoginTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.refreshLaunchAtLoginStatus()
+            }
         }
     }
 
-    /// Enable launch at login
+    /// Refresh launch at login status from system
+    func refreshLaunchAtLoginStatus() {
+        let newStatus = LaunchAtLoginManager.shared.isEnabled
+        if newStatus != isLaunchAtLoginEnabled {
+            isLaunchAtLoginEnabled = newStatus
+        }
+    }
+
+    /// Enable launch at login (register with SMAppService)
     func enableLaunchAtLogin() {
-        LaunchAtLoginManager.shared.enable { [weak self] success in
-            if success {
-                self?.isLaunchAtLoginEnabled = true
-            } else {
-                self?.openLoginItemsSettings()
-            }
+        do {
+            try LaunchAtLoginManager.shared.enable()
+            refreshLaunchAtLoginStatus()
+        } catch {
+            // If registration fails or requires approval, open System Settings
+            openLoginItemsSettings()
         }
     }
 
@@ -329,10 +349,6 @@ struct MainSettingsView: View {
             if let page = notification.object as? NavigationPage {
                 selectedPage = page
             }
-        }
-        .onAppear {
-            // Refresh launch at login status when view appears
-            appState.refreshLaunchAtLoginStatus()
         }
     }
 
@@ -523,8 +539,8 @@ struct SettingsPageView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            // Launch at Login warning banner (only show when explicitly disabled)
-            if appState.isLaunchAtLoginEnabled == false {
+            // Launch at Login warning banner
+            if !appState.isLaunchAtLoginEnabled {
                 LaunchAtLoginBanner {
                     appState.enableLaunchAtLogin()
                 }
