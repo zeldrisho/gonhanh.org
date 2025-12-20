@@ -217,105 +217,65 @@ private class TextInjector {
     }
 
     /// AX API injection: Directly manipulate text field via Accessibility API
-    /// Used for Spotlight on macOS 13+ where synthetic keyboard events are unreliable
-    /// This approach bypasses autocomplete behavior entirely by setting kAXValueAttribute directly
-    /// Returns true if successful, false if AX API fails (caller should fallback to synthetic events)
+    /// Used for Spotlight/Arc where synthetic keyboard events are unreliable due to autocomplete
+    /// Returns true if successful, false if caller should fallback to synthetic events
     func injectViaAX(bs: Int, text: String) -> Bool {
-        let systemWide = AXUIElementCreateSystemWide()
-        var focused: CFTypeRef?
-
         // Get focused element
-        guard AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
-              let el = focused else {
-            Log.info("AX: no focused element")
+        let systemWide = AXUIElementCreateSystemWide()
+        var focusedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success,
+              let ref = focusedRef else {
+            Log.info("AX: no focus")
+            return false
+        }
+        let axEl = ref as! AXUIElement
+
+        // Read current text value
+        var valueRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axEl, kAXValueAttribute as CFString, &valueRef) == .success else {
+            Log.info("AX: no value")
+            return false
+        }
+        let fullText = (valueRef as? String) ?? ""
+
+        // Read cursor position and selection
+        var rangeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axEl, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
+              let axRange = rangeRef else {
+            Log.info("AX: no range")
+            return false
+        }
+        var range = CFRange()
+        guard AXValueGetValue(axRange as! AXValue, .cfRange, &range), range.location >= 0 else {
+            Log.info("AX: bad range")
             return false
         }
 
-        let axEl = el as! AXUIElement
+        let cursor = range.location
+        let selection = range.length
 
-        // Get current text value
-        var textValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(axEl, kAXValueAttribute as CFString, &textValue) == .success else {
-            Log.info("AX: can't read value")
+        // Handle autocomplete: when selection > 0, text after cursor is autocomplete suggestion
+        // Example: "a|rc://chrome-urls" where "|" is cursor, "rc://..." is selected suggestion
+        let userText = (selection > 0 && cursor <= fullText.count)
+            ? String(fullText.prefix(cursor))
+            : fullText
+
+        // Calculate replacement: delete `bs` chars before cursor, insert `text`
+        let deleteStart = max(0, cursor - bs)
+        let prefix = String(userText.prefix(deleteStart))
+        let suffix = String(userText.dropFirst(cursor))
+        let newText = (prefix + text + suffix).precomposedStringWithCanonicalMapping
+
+        // Write new value
+        guard AXUIElementSetAttributeValue(axEl, kAXValueAttribute as CFString, newText as CFTypeRef) == .success else {
+            Log.info("AX: write failed")
             return false
         }
 
-        let fullText = (textValue as? String) ?? ""
-
-        // Get selected text range (cursor position + selection length)
-        var rangeValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(axEl, kAXSelectedTextRangeAttribute as CFString, &rangeValue) == .success else {
-            Log.info("AX: can't read range")
-            return false
-        }
-
-        // Extract CFRange from AXValue
-        var range = CFRange(location: 0, length: 0)
-        guard AXValueGetValue(rangeValue as! AXValue, .cfRange, &range) else {
-            Log.info("AX: can't decode range")
-            return false
-        }
-
-        let cursorPos = range.location
-        let selectionLength = range.length
-        guard cursorPos >= 0 else {
-            Log.info("AX: invalid cursor")
-            return false
-        }
-
-        // IMPORTANT: Handle autocomplete suggestions (Arc, Chrome, etc.)
-        // When autocomplete is active, the suggestion text is SELECTED (highlighted)
-        // We should only work with the text BEFORE the selection (user-typed text)
-        // Example: User types "a" → Arc shows "a|rc://chrome-urls" where "rc://..." is selected
-        //          fullText = "arc://chrome-urls", cursorPos = 1, selectionLength = 17
-        //          We only want to work with "a" (text before cursor)
-        let currentText: String
-        if selectionLength > 0 && cursorPos <= fullText.count {
-            // Has autocomplete suggestion - only take text before cursor
-            let textChars = Array(fullText)
-            currentText = String(textChars[0..<cursorPos])
-            Log.info("AX: autocomplete detected, using text before cursor: '\(currentText)'")
-        } else {
-            currentText = fullText
-        }
-
-        // Calculate replacement range
-        var start = cursorPos - bs
-        if start < 0 { start = 0 }
-        var length = cursorPos - start
-        if length < 0 { length = 0 }
-        if start + length > currentText.count {
-            length = currentText.count - start
-            if length < 0 { length = 0 }
-        }
-
-        // Build new text by replacing characters (no autocomplete suggestion)
-        let textChars = Array(currentText)
-        let startIndex = start
-        let endIndex = start + length
-        var newChars = Array(textChars[0..<startIndex])
-        newChars.append(contentsOf: text)
-        if endIndex < textChars.count {
-            newChars.append(contentsOf: textChars[endIndex...])
-        }
-        let newText = String(newChars)
-
-        // Convert to precomposed Unicode (important for Spotlight)
-        // This prevents decomposed diacritics from causing display issues
-        let precomposedText = newText.precomposedStringWithCanonicalMapping
-
-        // Set new value
-        let setResult = AXUIElementSetAttributeValue(axEl, kAXValueAttribute as CFString, precomposedText as CFTypeRef)
-        guard setResult == .success else {
-            Log.info("AX: can't set value (err=\(setResult.rawValue))")
-            return false
-        }
-
-        // Update cursor position to end of inserted text
-        let newCursorPos = start + text.count
-        var newRange = CFRange(location: newCursorPos, length: 0)
-        if let newRangeValue = AXValueCreate(.cfRange, &newRange) {
-            AXUIElementSetAttributeValue(axEl, kAXSelectedTextRangeAttribute as CFString, newRangeValue)
+        // Update cursor to end of inserted text
+        var newCursor = CFRange(location: deleteStart + text.count, length: 0)
+        if let newRange = AXValueCreate(.cfRange, &newCursor) {
+            AXUIElementSetAttributeValue(axEl, kAXSelectedTextRangeAttribute as CFString, newRange)
         }
 
         Log.send("ax", bs, text)
