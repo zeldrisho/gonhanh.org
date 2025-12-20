@@ -45,8 +45,9 @@ private enum InjectionMethod {
     case fast           // Default: backspace + text with minimal delays
     case slow           // Terminals/Electron: backspace + text with higher delays
     case selection      // Browser address bars: Shift+Left select + type replacement
-    case autocomplete   // Spotlight: Forward Delete + backspace + text via proxy
+    case autocomplete   // Spotlight fallback: Forward Delete + backspace + text via proxy
     case selectAll      // Select All + Replace: Cmd+A + type full buffer (for autocomplete apps)
+    case axDirect       // Spotlight primary: AX API direct text manipulation (macOS 13+)
 }
 
 // MARK: - Text Injector
@@ -111,6 +112,8 @@ private class TextInjector {
             injectViaSelection(bs: bs, text: text, delays: delays)
         case .autocomplete:
             injectViaAutocomplete(bs: bs, text: text, proxy: proxy)
+        case .axDirect:
+            injectViaAXWithFallback(bs: bs, text: text, proxy: proxy)
         case .selectAll:
             injectViaSelectAll(proxy: proxy)
         case .slow, .fast:
@@ -211,6 +214,90 @@ private class TextInjector {
         // Type full session buffer (replaces all selected text)
         postText(fullText, source: src, proxy: proxy)
         Log.send("selAll", 0, fullText)
+    }
+
+    /// AX API injection: Directly manipulate text field via Accessibility API
+    /// Used for Spotlight/Arc where synthetic keyboard events are unreliable due to autocomplete
+    /// Returns true if successful, false if caller should fallback to synthetic events
+    func injectViaAX(bs: Int, text: String) -> Bool {
+        // Get focused element
+        let systemWide = AXUIElementCreateSystemWide()
+        var focusedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success,
+              let ref = focusedRef else {
+            Log.info("AX: no focus")
+            return false
+        }
+        let axEl = ref as! AXUIElement
+
+        // Read current text value
+        var valueRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axEl, kAXValueAttribute as CFString, &valueRef) == .success else {
+            Log.info("AX: no value")
+            return false
+        }
+        let fullText = (valueRef as? String) ?? ""
+
+        // Read cursor position and selection
+        var rangeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axEl, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
+              let axRange = rangeRef else {
+            Log.info("AX: no range")
+            return false
+        }
+        var range = CFRange()
+        guard AXValueGetValue(axRange as! AXValue, .cfRange, &range), range.location >= 0 else {
+            Log.info("AX: bad range")
+            return false
+        }
+
+        let cursor = range.location
+        let selection = range.length
+
+        // Handle autocomplete: when selection > 0, text after cursor is autocomplete suggestion
+        // Example: "a|rc://chrome-urls" where "|" is cursor, "rc://..." is selected suggestion
+        let userText = (selection > 0 && cursor <= fullText.count)
+            ? String(fullText.prefix(cursor))
+            : fullText
+
+        // Calculate replacement: delete `bs` chars before cursor, insert `text`
+        let deleteStart = max(0, cursor - bs)
+        let prefix = String(userText.prefix(deleteStart))
+        let suffix = String(userText.dropFirst(cursor))
+        let newText = (prefix + text + suffix).precomposedStringWithCanonicalMapping
+
+        // Write new value
+        guard AXUIElementSetAttributeValue(axEl, kAXValueAttribute as CFString, newText as CFTypeRef) == .success else {
+            Log.info("AX: write failed")
+            return false
+        }
+
+        // Update cursor to end of inserted text
+        var newCursor = CFRange(location: deleteStart + text.count, length: 0)
+        if let newRange = AXValueCreate(.cfRange, &newCursor) {
+            AXUIElementSetAttributeValue(axEl, kAXSelectedTextRangeAttribute as CFString, newRange)
+        }
+
+        Log.send("ax", bs, text)
+        return true
+    }
+
+    /// Try AX injection with retries, fallback to synthetic events if all fail
+    /// Spotlight can be busy searching, causing AX API to fail temporarily
+    func injectViaAXWithFallback(bs: Int, text: String, proxy: CGEventTapProxy) {
+        // Try AX API up to 3 times (Spotlight might be busy)
+        for attempt in 0..<3 {
+            if attempt > 0 {
+                usleep(5000)  // 5ms delay before retry
+            }
+            if injectViaAX(bs: bs, text: text) {
+                return  // Success!
+            }
+        }
+
+        // All AX attempts failed - fallback to autocomplete method
+        Log.info("AX: fallback to autocomplete")
+        injectViaAutocomplete(bs: bs, text: text, proxy: proxy)
     }
 
     // MARK: - Helpers
@@ -796,8 +883,8 @@ private func keyboardCallback(
     // Backspace handling: try to restore word from screen when backspacing into it
     // This enables editing marks on previously committed words
     if keyCode == KeyCode.backspace && !ctrl {
-        // For selectAll method: handle backspace
-        if method == .selectAll {
+        // For selectAll method: handle backspace (only when enabled)
+        if method == .selectAll && AppState.shared.isEnabled {
             let session = TextInjector.shared.getSessionBuffer()
             if !session.isEmpty {
                 // Session has content - remove last char and re-inject
@@ -839,7 +926,7 @@ private func keyboardCallback(
 
     // For selectAll method: handle pass-through keys (space, punctuation, etc.)
     // These need to be appended to session buffer and trigger Cmd+A replacement
-    if method == .selectAll {
+    if method == .selectAll && AppState.shared.isEnabled {
         // Convert keyCode to character
         if let char = keyCodeToChar(keyCode: keyCode, shift: shift) {
             TextInjector.shared.updateSessionBuffer(backspace: 0, newText: String(char))
@@ -958,21 +1045,19 @@ private func detectMethod() -> (InjectionMethod, (UInt32, UInt32, UInt32)) {
     if role == "AXComboBox" { Log.method("sel:combo"); return (.selection, (0, 0, 0)) }
     if role == "AXSearchField" { Log.method("sel:search"); return (.selection, (0, 0, 0)) }
 
-    // Spotlight - use selectAll for macOS 13 and earlier, autocomplete for macOS 14+
-    if bundleId == "com.apple.Spotlight" {
-        if #available(macOS 14, *) {
-            Log.method("auto:spotlight")
-            return (.autocomplete, (0, 0, 0))
-        } else {
-            Log.method("selAll:spotlight")
-            return (.selectAll, (0, 0, 0))
-        }
+    // Spotlight - use AX API direct manipulation (works on macOS 13+)
+    // This bypasses Spotlight's autocomplete behavior by directly setting text field value
+    // Note: Spotlight can run under com.apple.systemuiserver in some cases
+    if bundleId == "com.apple.Spotlight" || bundleId == "com.apple.systemuiserver" {
+        Log.method("ax:spotlight")
+        return (.axDirect, (0, 0, 0))
     }
 
-    // Arc browser - test Select All method for address bar
+    // Arc browser - use AX API for address bar (same approach as Spotlight)
+    // Arc is Chromium-based with good accessibility support
     if bundleId == "company.thebrowser.Browser" && role == "AXTextField" {
-        Log.method("selAll:arc")
-        return (.selectAll, (0, 0, 0))
+        Log.method("ax:arc")
+        return (.axDirect, (0, 0, 0))
     }
 
     // Browser address bars (AXTextField with autocomplete)
