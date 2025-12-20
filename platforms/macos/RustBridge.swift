@@ -381,6 +381,7 @@ private struct ImeResult {
 @_silgen_name("ime_modern") private func ime_modern(_ modern: Bool)
 @_silgen_name("ime_english_auto_restore") private func ime_english_auto_restore(_ enabled: Bool)
 @_silgen_name("ime_clear") private func ime_clear()
+@_silgen_name("ime_clear_all") private func ime_clear_all()
 @_silgen_name("ime_free") private func ime_free(_ result: UnsafeMutablePointer<ImeResult>?)
 
 // Shortcut FFI
@@ -464,6 +465,9 @@ class RustBridge {
 
     static func clearBuffer() { ime_clear() }
 
+    /// Clear buffer and word history (use on mouse click, focus change)
+    static func clearBufferAll() { ime_clear_all() }
+
     /// Get full composed buffer as string (for Select All injection method)
     static func getFullBuffer() -> String {
         var buffer = [UInt32](repeating: 0, count: 64)
@@ -523,6 +527,7 @@ class KeyboardHookManager {
 
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var mouseMonitor: Any?  // NSEvent monitor for mouse clicks
     private var isRunning = false
 
     private init() {}
@@ -539,7 +544,9 @@ class KeyboardHookManager {
 
         RustBridge.initialize()
 
-        let mask: CGEventMask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.flagsChanged.rawValue)
+        // Listen for keyboard events only (mouse handled by NSEvent monitor)
+        let mask: CGEventMask = (1 << CGEventType.keyDown.rawValue) |
+                                (1 << CGEventType.flagsChanged.rawValue)
         let tap = CGEvent.tapCreate(tap: .cghidEventTap, place: .headInsertEventTap,
                                     options: .defaultTap, eventsOfInterest: mask,
                                     callback: keyboardCallback, userInfo: nil)
@@ -559,7 +566,20 @@ class KeyboardHookManager {
             CGEvent.tapEnable(tap: tap, enable: true)
             isRunning = true
             setupShortcutObserver()
+            startMouseMonitor()
             Log.info("Hook started")
+        }
+    }
+
+    /// Start NSEvent global monitor for mouse events
+    /// This is more reliable than CGEventTap for detecting mouse clicks
+    private func startMouseMonitor() {
+        // Monitor both mouseDown and mouseUp to catch clicks and drag-selects
+        mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp]) { _ in
+            TextInjector.shared.clearSessionBuffer()
+            RustBridge.clearBufferAll()  // Clear everything including word history
+            skipWordRestoreAfterClick = true
+            Log.info("Mouse event: cleared buffer, skip restore = true")
         }
     }
 
@@ -567,8 +587,10 @@ class KeyboardHookManager {
         guard isRunning else { return }
         if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: false) }
         if let src = runLoopSource { CFRunLoopRemoveSource(CFRunLoopGetCurrent(), src, .commonModes) }
+        if let monitor = mouseMonitor { NSEvent.removeMonitor(monitor) }
         eventTap = nil
         runLoopSource = nil
+        mouseMonitor = nil
         isRunning = false
         Log.info("Hook stopped")
     }
@@ -600,6 +622,9 @@ private var isRecordingShortcut = false
 private var recordingModifiers: CGEventFlags = []      // Current modifiers being held
 private var peakRecordingModifiers: CGEventFlags = []  // Peak modifiers during recording
 private var shortcutObserver: NSObjectProtocol?
+/// Skip word restore after mouse click (user may be selecting/deleting text)
+/// Reset to false after first keystroke
+private var skipWordRestoreAfterClick = false
 
 // MARK: - Word Restore Support
 
@@ -902,13 +927,22 @@ private func keyboardCallback(
 
         // Engine returned none - try to restore word from screen
         // This handles: "chào " + backspace to delete space and enter word
-        if let word = getWordToRestoreOnBackspace() {
+        // Skip restore if just clicked (user may be deleting a selection)
+        if !skipWordRestoreAfterClick, let word = getWordToRestoreOnBackspace() {
             RustBridge.restoreWord(word)
             Log.info("Restored word from screen: \(word)")
         }
+        // Don't reset skipWordRestoreAfterClick here - keep skipping until a real letter is typed
 
         // Pass through backspace to delete the character
         return Unmanaged.passUnretained(event)
+    }
+
+    // Reset skip flag only when a real letter key is pressed (not backspace/delete/modifiers)
+    // This ensures we skip word restore for ALL backspaces after a mouse click
+    let isLetterKey = keyCode <= 0x32 && keyCode != KeyCode.backspace  // Rough check for letter keys
+    if isLetterKey {
+        skipWordRestoreAfterClick = false
     }
 
     if let (bs, chars) = RustBridge.processKey(keyCode: keyCode, caps: caps, ctrl: ctrl, shift: shift) {
