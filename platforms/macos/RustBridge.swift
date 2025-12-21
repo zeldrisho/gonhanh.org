@@ -1158,14 +1158,35 @@ private func detectMethod() -> (InjectionMethod, (UInt32, UInt32, UInt32)) {
         return (.axDirect, (0, 0, 0))
     }
 
-    // Arc browser - use AX API for address bar (same approach as Spotlight)
-    // Arc is Chromium-based with good accessibility support
-    if bundleId == "company.thebrowser.Browser" && role == "AXTextField" {
+    // Arc/Dia browser - use AX API for address bar (same approach as Spotlight)
+    // The Browser Company apps have good accessibility support
+    // Dia uses AXTextArea for input fields, Arc uses AXTextField
+    let theBrowserCompany = ["company.thebrowser.Browser", "company.thebrowser.Arc", "company.thebrowser.dia"]
+    if theBrowserCompany.contains(bundleId) && (role == "AXTextField" || role == "AXTextArea") {
         Log.method("ax:arc")
         return (.axDirect, (0, 0, 0))
     }
 
+    // Firefox-based browsers - use AX API for address bar
+    // Firefox has good accessibility support, AX direct works better than selection
+    let firefoxBrowsers = [
+        "org.mozilla.firefox",                      // Firefox
+        "org.mozilla.firefoxdeveloperedition",      // Firefox Developer
+        "org.mozilla.nightly",                      // Firefox Nightly
+        "org.waterfoxproject.waterfox",             // Waterfox
+        "io.gitlab.librewolf-community.librewolf", // LibreWolf
+        "one.ablaze.floorp",                        // Floorp
+        "org.torproject.torbrowser",                // Tor Browser
+        "net.mullvad.mullvadbrowser",               // Mullvad Browser
+        "app.zen-browser.zen"                       // Zen Browser (Firefox-based)
+    ]
+    if firefoxBrowsers.contains(bundleId) && role == "AXTextField" {
+        Log.method("ax:firefox")
+        return (.axDirect, (0, 0, 0))
+    }
+
     // Browser address bars (AXTextField with autocomplete)
+    // Note: Arc and Firefox-based browsers use axDirect (handled above)
     let browsers = [
         // Chromium-based
         "com.google.Chrome",             // Google Chrome
@@ -1188,25 +1209,12 @@ private func detectMethod() -> (InjectionMethod, (UInt32, UInt32, UInt32)) {
         "com.operasoftware.OperaGX",     // Opera GX
         "com.operasoftware.OperaAir",    // Opera Air
         "com.opera.OperaNext",           // Opera Next
-        // Firefox-based
-        "org.mozilla.firefox",           // Firefox
-        "org.mozilla.firefoxdeveloperedition", // Firefox Developer
-        "org.mozilla.nightly",           // Firefox Nightly
-        "org.waterfoxproject.waterfox",  // Waterfox
-        "io.gitlab.librewolf-community.librewolf", // LibreWolf
-        "one.ablaze.floorp",             // Floorp
-        "org.torproject.torbrowser",     // Tor Browser
-        "net.mullvad.mullvadbrowser",    // Mullvad Browser
         // Safari
         "com.apple.Safari",              // Safari
         "com.apple.SafariTechnologyPreview", // Safari Tech Preview
         // WebKit-based
         "com.kagi.kagimacOS",            // Orion (Kagi)
-        // Arc & Others
-        "company.thebrowser.Browser",    // The Browser Company
-        "company.thebrowser.Arc",        // Arc
-        "company.thebrowser.dia",        // Dia (The Browser Company)
-        "app.zen-browser.zen",           // Zen Browser
+        // Others
         "com.sigmaos.sigmaos.macos",     // SigmaOS
         "com.pushplaylabs.sidekick",     // Sidekick
         "com.firstversionist.polypane",  // Polypane
