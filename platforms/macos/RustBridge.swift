@@ -1360,7 +1360,6 @@ class PerAppModeManager {
 
     private var currentBundleId: String?
     private var observer: NSObjectProtocol?
-    private var mouseClickMonitor: Any?
 
     private init() {}
 
@@ -1379,13 +1378,11 @@ class PerAppModeManager {
             SpecialPanelAppDetector.updateLastFrontMostApp(bundleId)
             self?.handleAppSwitch(bundleId)
         }
-        
-        // Monitor mouse clicks to detect special panel apps (Spotlight, Raycast)
-        // These apps don't trigger NSWorkspaceDidActivateApplicationNotification
-        mouseClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            self?.checkSpecialPanelApp()
-        }
-        
+
+        // NOTE: Removed mouse click monitor for checkSpecialPanelApp() - it was causing
+        // system-wide lag because CGWindowListCopyWindowInfo + AX queries run on EVERY click.
+        // Keyboard-based detection (in keyboardCallback) is sufficient for Spotlight/Raycast.
+
         Log.info("PerAppModeManager started")
     }
 
@@ -1394,10 +1391,6 @@ class PerAppModeManager {
         if let observer = observer {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
             self.observer = nil
-        }
-        if let monitor = mouseClickMonitor {
-            NSEvent.removeMonitor(monitor)
-            mouseClickMonitor = nil
         }
     }
 

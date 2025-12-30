@@ -932,24 +932,41 @@ struct ShortcutsSheet: View {
     }
 
     private func importShortcuts() {
-        let panel = NSOpenPanel()
-        panel.title = "Nhập từ viết tắt"
-        panel.allowedContentTypes = [.plainText, .init(filenameExtension: "txt")!]
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        if panel.runModal() == .OK, let url = panel.url,
-           let content = try? String(contentsOf: url, encoding: .utf8) {
-            _ = appState.importShortcuts(from: content)
+        // Dispatch panel creation to next run loop to prevent UI blocking
+        DispatchQueue.main.async { [weak appState] in
+            let panel = NSOpenPanel()
+            panel.title = "Nhập từ viết tắt"
+            panel.allowedContentTypes = [.plainText]
+            panel.allowsMultipleSelection = false
+            panel.canChooseDirectories = false
+            panel.begin { response in
+                guard response == .OK, let url = panel.url else { return }
+                // Read file on background thread
+                DispatchQueue.global(qos: .userInitiated).async {
+                    guard let content = try? String(contentsOf: url, encoding: .utf8) else { return }
+                    DispatchQueue.main.async {
+                        _ = appState?.importShortcuts(from: content)
+                    }
+                }
+            }
         }
     }
 
     private func exportShortcuts() {
-        let panel = NSSavePanel()
-        panel.title = "Xuất từ viết tắt"
-        panel.nameFieldStringValue = "gonhanh-shortcuts.txt"
-        panel.allowedContentTypes = [.plainText]
-        if panel.runModal() == .OK, let url = panel.url {
-            try? appState.exportShortcuts().write(to: url, atomically: true, encoding: .utf8)
+        // Dispatch panel creation to next run loop to prevent UI blocking
+        DispatchQueue.main.async { [weak appState] in
+            let panel = NSSavePanel()
+            panel.title = "Xuất từ viết tắt"
+            panel.nameFieldStringValue = "gonhanh-shortcuts.txt"
+            panel.allowedContentTypes = [.plainText]
+            panel.begin { response in
+                guard response == .OK, let url = panel.url else { return }
+                // Write file on background thread
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let content = appState?.exportShortcuts() ?? ""
+                    try? content.write(to: url, atomically: true, encoding: .utf8)
+                }
+            }
         }
     }
 }
