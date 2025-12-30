@@ -6,11 +6,11 @@ import AppKit
 
 /// Debug logging - only active when /tmp/gonhanh_debug.log exists
 /// Enable: touch /tmp/gonhanh_debug.log | Disable: rm /tmp/gonhanh_debug.log
-/// PERFORMANCE: isEnabled cached to avoid FileManager call on every keystroke
+/// PERFORMANCE: isEnabled cached, @autoclosure defers string formatting until needed
 private enum Log {
     private static let logPath = "/tmp/gonhanh_debug.log"
     private static var _enabled: Bool?
-    private static var isEnabled: Bool {
+    static var isEnabled: Bool {
         if let cached = _enabled { return cached }
         _enabled = FileManager.default.fileExists(atPath: logPath)
         return _enabled!
@@ -19,24 +19,21 @@ private enum Log {
     /// Call to refresh enabled state (e.g., on app activation)
     static func refresh() { _enabled = nil }
 
-    private static func write(_ msg: String) {
+    private static func write(_ msg: @autoclosure () -> String) {
         guard isEnabled, let handle = FileHandle(forWritingAtPath: logPath) else { return }
         let now = CFAbsoluteTimeGetCurrent()
-        let secs = Int(now) % 86400  // Seconds since midnight
+        let secs = Int(now) % 86400
         let ms = Int((now - floor(now)) * 1000)
         let ts = String(format: "%02d:%02d:%02d.%03d", secs / 3600, (secs / 60) % 60, secs % 60, ms)
         handle.seekToEndOfFile()
-        handle.write("[\(ts)] \(msg)\n".data(using: .utf8)!)
+        handle.write("[\(ts)] \(msg())\n".data(using: .utf8)!)
         handle.closeFile()
     }
 
-    static func key(_ code: UInt16, _ result: String) { write("K:\(code) → \(result)") }
-    static func transform(_ bs: Int, _ chars: String) { write("T: ←\(bs) \"\(chars)\"") }
-    static func send(_ method: String, _ bs: Int, _ chars: String) { write("S:\(method) ←\(bs) \"\(chars)\"") }
-    static func method(_ name: String) { write("M: \(name)") }
-    static func info(_ msg: String) { write("I: \(msg)") }
-    static func skip() { write("K: skip (self)") }
-    static func queue(_ msg: String) { write("Q: \(msg)") }
+    static func key(_ code: UInt16, _ result: @autoclosure () -> String) { guard isEnabled else { return }; write("K:\(code) → \(result())") }
+    static func method(_ name: @autoclosure () -> String) { guard isEnabled else { return }; write("M: \(name())") }
+    static func info(_ msg: @autoclosure () -> String) { guard isEnabled else { return }; write("I: \(msg())") }
+    static func queue(_ msg: @autoclosure () -> String) { guard isEnabled else { return }; write("Q: \(msg())") }
 }
 
 // MARK: - Constants
@@ -209,7 +206,6 @@ private class TextInjector {
         if bs > 0 { usleep(delays.1) }
 
         postText(text, source: src, delay: delays.2)
-        Log.send("bs", bs, text)
     }
 
     /// Selection injection: Shift+Left to select, then type replacement (for browser address bars)
@@ -242,7 +238,6 @@ private class TextInjector {
         }
 
         postText(text, source: src, delay: textDelay)
-        Log.send("sel", bs, text)
     }
 
     /// Autocomplete injection: Forward Delete to clear suggestion, then backspace + text via proxy
@@ -263,7 +258,6 @@ private class TextInjector {
 
         // Type replacement text
         postText(text, source: src, proxy: proxy)
-        Log.send("auto", bs, text)
     }
 
     /// Select All injection: Select all text then type full session buffer
@@ -285,7 +279,6 @@ private class TextInjector {
 
         // Type full session buffer (replaces all selected text)
         postText(fullText, source: src, proxy: proxy)
-        Log.send("selAll", 0, fullText)
     }
 
     /// AX API injection: Directly manipulate text field via Accessibility API
@@ -350,7 +343,6 @@ private class TextInjector {
             AXUIElementSetAttributeValue(axEl, kAXSelectedTextRangeAttribute as CFString, newRange)
         }
 
-        Log.send("ax", bs, text)
         return true
     }
 
