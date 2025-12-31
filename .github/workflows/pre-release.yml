@@ -11,6 +11,7 @@ on:
         type: choice
         options:
           - macos
+          - windows
           - linux
           - all
       sign:
@@ -288,4 +289,36 @@ jobs:
         with:
           name: GoNhanh-${{ steps.version.outputs.version }}-Linux
           path: platforms/linux/*.tar.gz
+          retention-days: 14
+
+  build-windows:
+    # Manual trigger (platform=windows or all)
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.platform == 'windows' || inputs.platform == 'all') }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build Windows App
+        shell: bash
+        run: |
+          ./scripts/build-windows.sh
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GoNhanh-Windows
+          path: platforms/windows/*.zip
           retention-days: 14
