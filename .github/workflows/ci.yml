@@ -76,3 +76,24 @@ jobs:
           LD_LIBRARY_PATH="${GITHUB_WORKSPACE}/core/target/release:$LD_LIBRARY_PATH" \
             ./rustbridge_test --gtest_color=yes
 
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - name: Build Rust core
+        run: powershell -ExecutionPolicy Bypass -File scripts/build-core-windows.ps1 -Release
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Build WPF App
+        run: dotnet build -c Release platforms/windows/GoNhanh/GoNhanh.csproj
+      - name: Run Rust tests
+        run: cargo test --manifest-path core/Cargo.toml
+
