@@ -356,7 +356,6 @@ jobs:
           echo "✅ Release updated with stapled DMG!"
 
   build-linux:
-    if: false  # Temporarily disabled
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -497,7 +496,6 @@ jobs:
           git push
 
   build-windows:
-    if: false  # Temporarily disabled
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -536,3 +534,8 @@ jobs:
         with:
           name: windows-zip
           path: platforms/windows/*.zip
+
+      - name: Add to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: platforms/windows/*.zip
