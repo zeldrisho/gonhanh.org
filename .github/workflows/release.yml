@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name for release (e.g. v1.0.0)'
+        required: true
+        default: 'v0.0.1'
 
 permissions:
   contents: write
@@ -23,6 +28,14 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+
+      - name: Setup Release Tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "RELEASE_TAG=${{ inputs.tag_name }}" >> $GITHUB_ENV
+          else
+            echo "RELEASE_TAG=${{ github.ref_name }}" >> $GITHUB_ENV
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -104,7 +117,7 @@ jobs:
       - name: Set Version in App
         run: |
           cd platforms/macos
-          V="${GITHUB_REF_NAME#v}"
+          V="${RELEASE_TAG#v}"
           APP="build/Build/Products/Release/GoNhanh.app"
 
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $V" "$APP/Contents/Info.plist"
@@ -236,9 +249,10 @@ jobs:
 
       - name: Get Tag Message
         id: tag_message
+        if: github.event_name != 'workflow_dispatch'
         run: |
-          git fetch origin tag ${{ github.ref_name }} --force
-          TAG_MSG=$(git for-each-ref --format='%(contents)' refs/tags/${{ github.ref_name }})
+          git fetch origin tag ${{ env.RELEASE_TAG }} --force
+          TAG_MSG=$(git for-each-ref --format='%(contents)' refs/tags/${{ env.RELEASE_TAG }})
 
           echo "=== Tag message ==="
           echo "$TAG_MSG"
@@ -253,6 +267,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
           files: platforms/macos/build/*.dmg
           body: ${{ steps.tag_message.outputs.message }}
           generate_release_notes: ${{ steps.tag_message.outputs.message == '' }}
@@ -268,6 +284,7 @@ jobs:
     outputs:
       submission_id: ${{ steps.notarize.outputs.submission_id }}
       stapled: ${{ steps.notarize.outputs.stapled }}
+      release_tag: ${{ env.RELEASE_TAG }}
 
   # ============================================================
   # BACKGROUND STAPLING (only if 30 min timeout, notarization pending)
@@ -292,6 +309,7 @@ jobs:
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           SUBMISSION_ID: ${{ needs.build-macos.outputs.submission_id }}
+          RELEASE_TAG: ${{ needs.build-macos.outputs.release_tag }}
         run: |
           echo "Waiting for notarization: $SUBMISSION_ID"
           echo "Polling every 30s, max 30 more minutes (already waited 30 min in main job)..."
@@ -342,7 +360,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${RELEASE_TAG}"
           DMG_FILE=$(ls platforms/macos/build/*.dmg | head -1)
 
           # Delete old asset and upload new one
@@ -360,6 +378,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Setup Release Tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "RELEASE_TAG=${{ inputs.tag_name }}" >> $GITHUB_ENV
+          else
+            echo "RELEASE_TAG=${{ github.ref_name }}" >> $GITHUB_ENV
+          fi
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -415,6 +440,8 @@ jobs:
       - name: Add to Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
           files: "*.tar.gz"
 
   # DEPRECATED: Gõ Nhanh now on official Homebrew (https://formulae.brew.sh/cask/gonhanh)
@@ -500,6 +527,13 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Setup Release Tag
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            echo "RELEASE_TAG=${{ inputs.tag_name }}" >> $env:GITHUB_ENV
+          } else {
+            echo "RELEASE_TAG=${{ github.ref_name }}" >> $env:GITHUB_ENV
+          }
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
@@ -527,7 +561,7 @@ jobs:
       - name: Package
         run: |
           cd platforms/windows
-          $V = "${{ github.ref_name }}".TrimStart('v')
+          $V = "$env:RELEASE_TAG".TrimStart('v')
           Compress-Archive -Path publish/* -DestinationPath "GoNhanh-$V-win-x64.zip"
 
       - name: Upload Windows artifact
@@ -539,4 +573,6 @@ jobs:
       - name: Add to Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
           files: platforms/windows/*.zip
